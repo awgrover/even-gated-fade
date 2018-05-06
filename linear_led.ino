@@ -22,6 +22,10 @@ But, start to become noticeable > 20, and definitely > 10. cf 'd1' 'd2'
 
 PWM 1*1 is hard to see. but is visible. (cf 'B')
 
+Decay-rate does seem to me to be visual "linear" in brightness: constant brightness change
+versus "nothing happens at 255->254, and accelerates as we get down to 50's".
+But, you can only get so far till n% == 1pwm.
+
 */
 
 #include "tired_of_serial.h";
@@ -73,12 +77,29 @@ void loop() {
           command = '?';
           break;
 
-        case 'f' : // fader
+        case 'f' : // explore decay-fade
+          {
+          print("decay percent 1..9: ");
+          char c = readone();
+          if ( c >= '1' && c <= '9' ) {
+            float decay = (c - '0') / 100.0;
+            print(F("decay @"));println(decay);
+            decay_fade(decay, led_direct, 20);
+            command = 0xff;
+            }
+          else {
+            print("?");
+            command='?';
+            }
+          }
+          break;
+
+        case '2' : // fader 20..0..20
           fader(led_direct,20, fader_delay);
           command = 0xff;
           break;
 
-        case 'G' : // gater on pwm(1)
+        case 'G' : // fade 1 * 255..0..255
           TCCR1B = TCCR1B & 0xF8 | 4; // pin 9, direct slowest rate
           TCCR2B = TCCR2B & 0xF8 | 1; // pin 11, gater faster rate
           analogWrite(led_direct, 1);
@@ -267,6 +288,7 @@ void eyeflicker(byte divisor) {
   }
   
 void fader(int pin, byte max, int step_delay) {
+  // fade from max..0..max
   while(1) {
     for (int p=max; p>0; p--) {
       analogWrite(pin, p);
@@ -322,4 +344,42 @@ void gater_fader(byte max) {
   TCCR2B = TCCR2B & 0xF8 | 3;
   }
 
+#include <math.h>
 
+void decay_fade(float decay_rate, int pin, int step_delay) {
+  // decay/grow at the rate, rounding to int, till delta is 0
+  // so, may never get to zero. at 2%, stops around 25.
+  byte fade[256] = {}; // force 0's
+
+  // build decay table
+  byte sofar = 255;
+  int i =0;
+  while (i <= 255) {
+    fade[i] = round(sofar);
+    sofar = round((float)sofar * (1.0 - decay_rate));
+    // print("D ");print(fade[i]);print(F("->"));print(sofar);
+    if (fade[i] == sofar) {
+      print(F("  Range 255.."));print(sofar);print(F(" steps "));println(i);
+      break; // done when it doesn't change
+      }
+    i++;
+    }
+  step_delay = 2000 / i;
+  print(F("step delay "));println(step_delay);
+
+  // run table (to 0, don't actually do zero!)
+  while(1) {
+    for(i=0; fade[i] != 0; i++) {
+      analogWrite(pin, fade[i]);
+      delay(step_delay);
+      }
+    if (Serial.available() > 0) break;
+    i--;
+    for(; i>=0; i--) {
+      analogWrite(pin, fade[i]);
+      delay(step_delay);
+      }
+    if (Serial.available() > 0) break;
+    }
+
+  }
