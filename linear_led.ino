@@ -22,10 +22,13 @@ But, start to become noticeable > 20, and definitely > 10. cf 'd1' 'd2'
 
 PWM 1*1 is hard to see. but is visible. (cf 'B')
 
-Decay-rate does seem to me to be visual "linear" in brightness: constant brightness change
-versus "nothing happens at 255->254, and accelerates as we get down to 50's".
+Decay-rate does seem to me to be visual "linear" in brightness (cf 'f'): constant brightness change
+versus "nothing happens at 255->254, and accelerates as we get down to 50's" (cf 'F').
 But, you can only get so far till n% == 1pwm.
 
+Deal with < delta-n steps
+
+What's the right decay rate? Didn't seem to notice stepping at 9%
 */
 
 #include "tired_of_serial.h";
@@ -35,13 +38,59 @@ const unsigned long CLOCKHZ = 16000000;
 const int led_direct = 9;
 const int led_gater = 11; // diff timer, gates the direct led
 const int fader_delay = 150;
+const int step_delay = 2000 / 255;
 
-#define maximize_diff_divisor \
-  TCCR1B = TCCR1B & 0xF8 | 4; /* pin 9, direct slowest rate */ \
+void inline maximize_diff_divisor() {
+  TCCR1B = TCCR1B & 0xF8 | 4; /* pin 9, direct slowest rate */
   TCCR2B = TCCR2B & 0xF8 | 1; /* pin 11, gater faster rate */
-#define default_divisors \
-  TCCR1B = TCCR1B & 0xF8 | 3; \
+  }
+void inline default_divisors() {
+  TCCR1B = TCCR1B & 0xF8 | 3;
   TCCR2B = TCCR2B & 0xF8 | 3;
+  }
+
+template<typename T, int sz> int size(T(&)[sz]) { return sz; }
+
+namespace gfade5percent {
+  // at 5% decay
+
+  // do simple direct pwm until lowest value
+  const byte direct_pwm[] = { 20,19,18,17,16,15,14,13,12,11,10, 0 };
+
+  // for lowest...0, do the gated first, then dec the direct_pwm
+  // fixme: these should just be counts in the direct_pwm list
+  const byte gated_pwm9[] = { 242, 230, 0 };  // to get to pwm 9
+  const byte gated_pwm8[] = { 242, 230, 0 };
+  const byte gated_pwm7[] = { 242, 230, 0 };
+  const byte gated_pwm6[] = { 242, 230, 219, 0 };
+  const byte gated_pwm5[] = { 242, 230, 219, 0 };
+  const byte gated_pwm4[] = { 242, 230, 219, 208, 0 };
+  const byte gated_pwm3[] = { 242, 230, 219, 208, 198, 0 };
+  const byte gated_pwm2[] = { 242, 230, 219, 208, 198, 188, 179, 0 };
+  const byte gated_pwm1[] = { 242, 230, 219, 208, 198, 188, 179, 170,162,154,146,139, 123, 0 };
+  const byte gated_pwm0[] = { 128, 0 }; // really, repeat the direct_pwm sequence
+
+  // we know this size because it's the last value in direct_pwm..0
+  const byte* gated_pwm[] = { gated_pwm0, gated_pwm1, gated_pwm2, gated_pwm3, gated_pwm4, gated_pwm5, gated_pwm6, gated_pwm7, gated_pwm8, gated_pwm9 };
+
+  }
+
+namespace gfade {
+  // at 3% decay
+
+  // do simple direct pwm until lowest value
+  const byte direct_pwm[] = { 26,25,24,23,22,21,20,19,18,17,16, 0 };
+
+  // for lowest...0, do the gated first, then dec the direct_pwm
+
+  // if direct_pwm went from 255...
+  // just enough steps to gate direct-2 to direct-1, i.e. 50% 
+  const byte top_direct_pwm[] = {255, 247, 240, 233, 226, 219, 212, 206, 200, 194, 188, 182, 177, 172, 167, 162, 157, 152, 147, 143, 139, 135, 131};
+
+  // how many from top_direct_pwm to use to transition from direct[x] to direct[x-1]
+  // we have more than we need here
+  const int gated_pwm_counts[] = { 23,14,10,8,6,6,5,4,4,4,3,3,3,3,3,2 };
+  }
 
 void setup() {
   Serial.begin(115200);
@@ -77,6 +126,11 @@ void loop() {
           command = '?';
           break;
 
+        case 'F' : // standard fade
+          standard_fade(led_direct);
+            command = 0xff;
+            break;
+
         case 'f' : // explore decay-fade
           {
           print("decay percent 1..9: ");
@@ -92,6 +146,11 @@ void loop() {
             command='?';
             }
           }
+          break;
+
+        case 'd' : // decay fade w/gated at low end
+          decay_bottom( led_direct );
+          command = 0xff;
           break;
 
         case '2' : // fader 20..0..20
@@ -136,7 +195,7 @@ void loop() {
           }
           break;
 
-        case 'd': // fade over a decade
+        case 'D': // fade over a decade
           {
           print(F("0..9 for decade "));
           char subcommand;
@@ -158,14 +217,17 @@ void loop() {
       
       case '?':
       // menu made by: use the menu.mk: make menu
-Serial.println(F("b  blink external led pin 9 and builtin 13"));
-Serial.println(F("B  blink from pwm(1) to pwm(0)"));
+Serial.println(F("b  blink from pwm(1) to pwm(0) (vs. all/on off for pin 11"));
+Serial.println(F("B  blink external led pin 9 and builtin 13"));
 Serial.println(F("t  timers"));
-Serial.println(F("f  fader"));
-Serial.println(F("G  gater on pwm(1)"));
+Serial.println(F("F  standard fade"));
+Serial.println(F("f  explore decay-fade"));
+Serial.println(F("D  decay fade w/gated at low end"));
+Serial.println(F("2  fader 20..0..20"));
+Serial.println(F("G  fade 1 * 255..0..255"));
 Serial.println(F("g  gater fader"));
 Serial.println(F("e  test eye flicker at pwm rate-divisor"));
-Serial.println(F("d  fade over a decade"));
+Serial.println(F("D  fade over a decade"));
       // end menu
 
       // fallthrough
@@ -364,7 +426,7 @@ void decay_fade(float decay_rate, int pin, int step_delay) {
       }
     i++;
     }
-  step_delay = 2000 / i;
+  step_delay = 2000 / i; // approximate constant wavelength so it's comparable
   print(F("step delay "));println(step_delay);
 
   // run table (to 0, don't actually do zero!)
@@ -382,4 +444,88 @@ void decay_fade(float decay_rate, int pin, int step_delay) {
     if (Serial.available() > 0) break;
     }
 
+  }
+
+void standard_fade(int pin) {
+  
+  int step_delay = 2000 / 255;
+
+  // run table (to 0, don't actually do zero!)
+  while(1) {
+    for(int i=1; i<255; i++) {
+      analogWrite(pin, i);
+      delay(step_delay);
+      }
+    if (Serial.available() > 0) break;
+
+    for(int i=255; i>1; i--) {
+      analogWrite(pin, i);
+      delay(step_delay);
+      }
+    if (Serial.available() > 0) break;
+    }
+
+  }
+
+void decay_bottom(int pin) {
+  // uses a decay table
+  // at the bottom of the values (20 for 5% decay)
+  // switch to a gated decay
+
+  maximize_diff_divisor();
+
+  int step_delay = 2000 / gfade::direct_pwm[0];
+
+  int direct_ct; // keep track of count in direct_pwm
+
+  while(1) {
+    // Down
+
+    // the direct table goes from max..lowest-direct-pwm,0
+    direct_ct = 0;
+    for( 
+        byte* pwm = gfade::direct_pwm;
+        *pwm != 0;
+        pwm++
+        ) {
+      direct_ct++;
+      print(*pwm);print(F(" "));println(millis());
+      analogWrite(pin, *pwm);
+      // delay(step_delay);
+      }
+    direct_ct--; // because we stepped to 0 as past end marker
+
+    //analogWrite(pin,255);
+    //delay(2);
+    //analogWrite(pin,gfade::direct_pwm[ direct_ct ]);
+
+    byte direct = gfade::direct_pwm[ direct_ct ] - 1 ; // last direct value -1
+
+    // for the rest of the direct pwm values, do a gated sequence on top, then decrement direct
+    for( ; direct > 0; direct--) { // don't do zero yet
+      int gated_count = gfade::gated_pwm_counts[ direct ];
+      print(direct+1);print(F(" ..."));println(gated_count); // current direct is +1
+
+      for(
+          int i = 1; // skip 255
+          i <= gated_count;
+          i++
+          ) {
+        byte gate_pwm = gfade::top_direct_pwm[i];
+        print(F("  g "));println(gate_pwm);
+        delay(step_delay);
+        analogWrite(led_gater, gate_pwm);
+        }
+
+        // last step to direct pwm value
+        delay(step_delay);
+        print(direct);print(F(" g "));println(255);
+        analogWrite(pin, direct); // because the gated-fade gets us to direct-1
+        analogWrite(led_gater, 255);
+        }
+
+    if (Serial.available() > 0) break;
+    }
+
+  default_divisors();
   }
