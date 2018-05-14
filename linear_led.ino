@@ -1,17 +1,83 @@
 /*
+1. Fade an led such that it looks like a uniform fade. So, you can see it fade at the high end at the same rate as mid and low-end.
+2. Prevent the visible "stepping" when you get around pwm 10. I.e. 10->9 is 10% brightness change! 2->1 is 50%!
+3. Fade below pwm 1. 1 is still quite bright.
 
-Low 3 bits are cpu clock divisor for PWM rate
+Hypothesis:
+
+1. The steps between brightness settings should be a set percentage. Choosing 3% as our rate.... So, if the max brightness is B, then B-1 should be 3% less, and B-2 should be _another_ 3% less, etc. That's a decay _rate_. It starts to become a problem when B-n * 3% < 1. I.e. when integer truncation gets bad. For 3% that's at 16 (though the rounding error gets bad around 20). We can make a table of the pwm values for a decay rate (i.e. 3%), down to 16.
+
+2. We could use a 2nd PWM to "gate" the primary PWM. So, if the primary is at 10, and we "gate" that at 242 (i.e. 95% duty cycle), we should get the equivalent of 9.5 pwm (10 * 95% = 9.5). If we use the table from hypothesis 1, we can evenly fade between whole pwm's from 10 (or wherever) on down. The wiring would be like:
+
+  gate-pwm    ------------->    _gate_ (2N2222)
+  primary-pwm ----> led -> source >| drain ----> gnd
+
+Thus, the gate-pwm turns the transistor on/off at some pwm rate. This requires that the gate-pwm and primary-pwm have some "high" ratio of their counter frequency: 255 or higher to get the most intermediate values. We'll assume the primary is the slower pwm clock. Arduinos can allow some pwm's to run faster than others.
+
+3. Similarly, we can dim below 1. If the primary pwm is at 1, and the "gate" is at 25, then it will be 25/256 the brightness: about 0.1 pwm equivalent!
+
+Development
+
+1. Built some tables in a spreadsheet, starting at 255 with a decay rate of 3%. Graphed them to visually check for a curve. Realized that PWM values are integers, so the table needs to either round or truncate. Rounding seems to minimize the accumulated error, and gives a "curve" that is really a sequence of lines: slope -7, slope -6 ... slope -1, slope 0. I calculated the error: it is below 1% of the exact value till about PWM 24. The difference between PWM values in the table is reasonable close to 3% down to about 30 (obviously 1/30 ~ 3.3%), but gets worse fairly quickly (1/25 is 4%, etc.). So, simple direct pwm will need anti "stepping" (as per hypothesis #2) around there.
+
+Built code with simple 3% decay, and it gave a good sense of "constant" fade rate.
+
+2. Built the simple circuit noted above, using a typical 20mA LED. The UNO has 3 banks of PWM pins, so I put the primary on pin 9 and the "gate" pwm on pin 11. An initial test with primary at 244hz (244 cycles of counting from 0..255 per sec) and gated at 62.5KHz showed that it worked as predicted: the "gate" pwm could set the LED at a intermediate value, and it appeared to be the obvious mathematical relationship: primary% * gate% = brightness%.
+
+I built a secondary table of B to B-1 and the percent change for each step from 16 down. At 16, the main "decay" table suffers roudning problems and the pwm value stays at 16 (slope 0). The secondary table looks like:
+  pwm next/this
+  16  93.75%
+  15  93.33%
+  ...
+  3   66.67%
+  2   50%
+The second column is the next values % of the current: 16  =15/16
+
+So, for these steps that need intermediate values, I want to decay the "gate" pwm at 3%, till primary*pwm ~ next_lower_value. Then I can reset to primary -= 1, gate=255, and I'm at the next lower value having taken 3% steps. Those steps are exactly the main "decay" table.
+
+I then look up that % in the main "decay" table, and I find that it is the 2nd, or 4th, or 23rd value. That tells me what sequence of pwm values to use for the "gate" pwm, to get intermediate values.
+
+For example, to go from 16 to 15, I start at pwm 16, gate 255. 15 is 93.75% of 16, and the main decay table shows:
+  255 100.00%
+  247 96.86%
+  240 94.12%
+  233 91.37%
+
+So, I should set the primary pwm to 16, and the gate to 255,
+then the gate to 247, then 240, (that's just > straight 15)
+then the primary gate to 15, and the gate to 255.
+That's a not too bad attempt at decreasing from 16 to 15 in 3% increments:
+  6.27% (16,255)
+  6.07% = 6.27% * 96.86% (16,247), about 3.14% smaller
+  5.88% = 15/255 (15,255), about 3.2% smaller
+I chose to use 2 fewer intermediate values, which will give me some rounding problems. I plan on using a program to generate the table and have smarter decisions about the intermediate value calculations to minimize this.
+
+Running some code for this worked pretty well, but I saw some flashes around primary-pwm 2. I isolated it to the transition:
+  (2,135) -> (1,255)
+I guessed that the primary pwm was slow enough that the transition wasn't nearly "atomic" enough. At 244 hz, it takes 4ms to finish one count from 0..255. So, changing the primary from 2 to 1 didn't "take effect" for up to 4ms, meanwhile the "gate" took effect very quickly (1/62.5KHz ~ .016ms). I only saw the flash about 1/2 to 2/3 of the time, which seems make sense with being able to see a 3-4msec flash. By putting in a delay of 4msec before changing the "gate", the flash went away.
+
+I chose to implement the intermediate adjustments at 16, which is too low. Already the step is above 5%, and I can visually see the fade rate change which I think is the result of that. I'll have to extend the table to 25 or 30.
+
+A nice side effect of choosing a 3% decay rate is getting about 270 steps. I'm considering adjusting things to give 255 steps. I should also explore a 2% or 1% decay rate. Though my current approach uses a table, so that would take significantly more memory, and I'm not sure how to handle the approach to zero.
+
+3. The above solution seems to have worked well for pwm values below 1. I use the same approach above: from 1 to 0, use the main decay table. This stops at about 
+  .03% ~ 1/255 * 17/255
+which is dim but still noticeably "on" for my not-exceptionally-bright led
+
+Notes:
+
+Low 3 bits are cpu clock divisor for PWM rate. Confusing, various web-pages say 500Hz, calculations say 976 (about 2x that).
 UNO is 16MHz
 5,6 TCCR0B, also delay(), and millis() (?)
-9,10 TCCR1B, default 500Hz, /64
+9,10 TCCR1B, default 500Hz, (<- wrong, I think)
 3,11 TCCR2B, default 500Hz
 
 divisors allowed values:
-  001 = 1 -> 1 / 256 = 62.5KHz
-  010 = 2 -> 8 / 256 = 7812.5Hz
-  011 = 3 -> 64 / 256 = 976.5625 DEFAULT
-  100 = 4 -> 256 / 256 = 244.14
-  101 = 5 -> 1024 / 256 = 61.035
+  001 = 1 -> / 1 / 256 = 62.5KHz
+  010 = 2 -> / 8 / 256 = 7812.5Hz
+  011 = 3 -> / 64 / 256 = 976.5625 DEFAULT
+  100 = 4 -> / 256 / 256 = 244.14
+  101 = 5 -> / 1024 / 256 = 61.035
 
   5 is very noticable duty cycle at pwm(50), when "flicking" the eye. cf 'e5'
   3 is only noticeable at fast eye flicker
@@ -46,9 +112,12 @@ Decay-rate does seem to me to be visual "linear" in brightness (cf 'f'): constan
 versus "nothing happens at 255->254, and accelerates as we get down to 50's" (cf 'F').
 But, you can only get so far till n% == 1pwm.
 
-Deal with < delta-n steps
-
 What's the right decay rate? Didn't seem to notice stepping at 9%
+We don't do fade from 0..255!
+We don't do arbitrary X..Y fade. etc. etc.
+Provide different decay rates.
+"normalize" to 255 steps.
+Build a single case table of pairs: [primary,gated]. Most will be [N,255]...
 */
 
 #include "tired_of_serial.h";
@@ -71,41 +140,15 @@ void inline default_divisors() {
 
 template<typename T, int sz> int size(T(&)[sz]) { return sz; }
 
-namespace gfade5percent {
-  // at 5% decay
-
-  // do simple direct pwm until lowest value
-  const byte direct_pwm[] = { 20,19,18,17,16,15,14,13,12,11,10, 0 };
-
-  // for lowest...0, do the gated first, then dec the direct_pwm
-  // fixme: these should just be counts in the direct_pwm list
-  const byte gated_pwm9[] = { 242, 230, 0 };  // to get to pwm 9
-  const byte gated_pwm8[] = { 242, 230, 0 };
-  const byte gated_pwm7[] = { 242, 230, 0 };
-  const byte gated_pwm6[] = { 242, 230, 219, 0 };
-  const byte gated_pwm5[] = { 242, 230, 219, 0 };
-  const byte gated_pwm4[] = { 242, 230, 219, 208, 0 };
-  const byte gated_pwm3[] = { 242, 230, 219, 208, 198, 0 };
-  const byte gated_pwm2[] = { 242, 230, 219, 208, 198, 188, 179, 0 };
-  const byte gated_pwm1[] = { 242, 230, 219, 208, 198, 188, 179, 170,162,154,146,139, 123, 0 };
-  const byte gated_pwm0[] = { 128, 0 }; // really, repeat the direct_pwm sequence
-
-  // we know this size because it's the last value in direct_pwm..0
-  const byte* gated_pwm[] = { gated_pwm0, gated_pwm1, gated_pwm2, gated_pwm3, gated_pwm4, gated_pwm5, gated_pwm6, gated_pwm7, gated_pwm8, gated_pwm9 };
-
-  }
-
 namespace gfade {
   // at 3% decay
 
   // do simple direct pwm until lowest value
-  // 87 steps of direct pwm
+  // 88 steps of direct pwm
   const byte direct_pwm[] = { 255,247,240,233,226,219,212,206,200,194,188,182,177,172,167,162,157,152,147,143,139,135,131,127,123,119,115,112,109,106,103,100,97,94,91,88,85,82,80,78,76,74,72,70,68,66,64,62,60,58,56,54,52,50,49,48,47,46,45,44,43,42,41,40,39,38,37,36,35,34,33,32,31,30,29,28,27,26,25,24,23,22,21,20,19,18,17, 0 };
 
-  // for lowest...0, do the gated first, then dec the direct_pwm
-
   // how many from the top of direct_pwm to use to transition from direct[x] to direct[x-1]
-  // you can have more than we need here. [0] doesn't happen of course
+  // you can have more than we need here. [0] to [-1] doesn't happen of course
   const int gated_pwm_counts[] = { 0, 88,23,14,10,8,6,6,5,4,4,4,3,3,3,3,3 };
   }
 
