@@ -13,9 +13,29 @@ divisors allowed values:
   100 = 4 -> 256 / 256 = 244.14
   101 = 5 -> 1024 / 256 = 61.035
 
-  5 is very noticable duty cycle at pwm(50) cf 'e5'
+  5 is very noticable duty cycle at pwm(50), when "flicking" the eye. cf 'e5'
   3 is only noticeable at fast eye flicker
   1 can't be detected by eye flicker
+
+  We need a high ratio of direct-pwm to gated-pwm for low direct-pwm values:
+    if 7812.5hz counter on direct pwm
+    and 62.5KHz on gated
+    then we only get 8 tics of the gated per tic of the direct
+    so, we only can gate the direct at: 100%, 7/8, 6/8, etc.
+    To get more "steps", you need a higher ratio.
+  But, there is significant "change over" time if the direct-pwm is low:
+    at 244hz counter, it takes 4ms to count from 0 to 255.
+    If you switch from 2 to 1 for the direct, and 120 to 255 on the gated
+    then worse case you'll see
+      2 for 4 more ms, and 255 on the gated
+      then 1 on direct, and 255 on gated, which is what you intended
+      And, I see a "flash" about 1/2 the time
+  So far, the only solution I see is to change the direct-pwm, and wait 4ms.
+    That's not ideal, because now there will be up to 4ms when it's [1,120]
+    before it goes to [1,255].
+    The eye is less sensitive to "drop-outs" than "flashes" though.
+    I vaguely remember something about timer-interrupts, but are they on the pwm timers?
+    
 
 PWM deltas are noticeable steps around 20.
 But, start to become noticeable > 20, and definitely > 10. cf 'd1' 'd2'
@@ -41,8 +61,8 @@ const int fader_delay = 150;
 const int step_delay = 2000 / 255;
 
 void inline maximize_diff_divisor() {
-  TCCR1B = TCCR1B & 0xF8 | 4; /* pin 9, direct slowest rate */
-  TCCR2B = TCCR2B & 0xF8 | 1; /* pin 11, gater faster rate */
+  TCCR1B = TCCR1B & 0xF8 | 4; // pin 9, direct slowest rate. Not enough ratio till "4":"1" :: 1:256
+  TCCR2B = TCCR2B & 0xF8 | 1; // pin 11, gater faster rate
   }
 void inline default_divisors() {
   TCCR1B = TCCR1B & 0xF8 | 3;
@@ -79,17 +99,14 @@ namespace gfade {
   // at 3% decay
 
   // do simple direct pwm until lowest value
-  const byte direct_pwm[] = { 26,25,24,23,22,21,20,19,18,17,16, 0 };
+  // 87 steps of direct pwm
+  const byte direct_pwm[] = { 255,247,240,233,226,219,212,206,200,194,188,182,177,172,167,162,157,152,147,143,139,135,131,127,123,119,115,112,109,106,103,100,97,94,91,88,85,82,80,78,76,74,72,70,68,66,64,62,60,58,56,54,52,50,49,48,47,46,45,44,43,42,41,40,39,38,37,36,35,34,33,32,31,30,29,28,27,26,25,24,23,22,21,20,19,18,17, 0 };
 
   // for lowest...0, do the gated first, then dec the direct_pwm
 
-  // if direct_pwm went from 255...
-  // just enough steps to gate direct-2 to direct-1, i.e. 50% 
-  const byte top_direct_pwm[] = {255, 247, 240, 233, 226, 219, 212, 206, 200, 194, 188, 182, 177, 172, 167, 162, 157, 152, 147, 143, 139, 135, 131};
-
-  // how many from top_direct_pwm to use to transition from direct[x] to direct[x-1]
-  // we have more than we need here
-  const int gated_pwm_counts[] = { 23,14,10,8,6,6,5,4,4,4,3,3,3,3,3,2 };
+  // how many from the top of direct_pwm to use to transition from direct[x] to direct[x-1]
+  // you can have more than we need here. [0] doesn't happen of course
+  const int gated_pwm_counts[] = { 0, 87,23,14,10,8,6,6,5,4,4,4,3,3,3,3,3 };
   }
 
 void setup() {
@@ -474,55 +491,64 @@ void decay_bottom(int pin) {
 
   maximize_diff_divisor();
 
-  int step_delay = 2000 / gfade::direct_pwm[0];
+  // find the start index
+  int start_at;
+  for( start_at=0; gfade::direct_pwm[ start_at ] != 25; start_at++);
 
-  int direct_ct; // keep track of count in direct_pwm
+  int step_delay = 1000 / gfade::direct_pwm[ start_at ];
+
+  byte direct_pwm_value;
 
   while(1) {
     // Down
 
     // the direct table goes from max..lowest-direct-pwm,0
-    direct_ct = 0;
+    analogWrite(led_gater, 255); // make sure
+    direct_pwm_value = 0;
     for( 
-        byte* pwm = gfade::direct_pwm;
-        *pwm != 0;
+        byte* pwm = &gfade::direct_pwm[ start_at ];
+        *pwm != 0; // zero is end. previous value is last direct-pwm
         pwm++
         ) {
-      direct_ct++;
-      print(*pwm);print(F(" "));println(millis());
-      analogWrite(pin, *pwm);
-      // delay(step_delay);
+      //break; //X
+      direct_pwm_value = *pwm; // we need it after this loop
+      analogWrite(pin, direct_pwm_value);
+      print(direct_pwm_value);print(F(" "));println( direct_pwm_value / 255.0 * 100 );
+      delay(step_delay);
       }
-    direct_ct--; // because we stepped to 0 as past end marker
-
-    //analogWrite(pin,255);
-    //delay(2);
-    //analogWrite(pin,gfade::direct_pwm[ direct_ct ]);
-
-    byte direct = gfade::direct_pwm[ direct_ct ] - 1 ; // last direct value -1
+    direct_pwm_value -= 1;
+    // direct_pwm_value is now the first value that needs to do gated got get to the next lower: direct_ct ... direct_ct-1
+    //direct_pwm_value = 2; //X
+    float current_percent;
+    float last_percent = direct_pwm_value / 255.0;
 
     // for the rest of the direct pwm values, do a gated sequence on top, then decrement direct
-    for( ; direct > 0; direct--) { // don't do zero yet
-      int gated_count = gfade::gated_pwm_counts[ direct ];
-      print(direct+1);print(F(" ..."));println(gated_count); // current direct is +1
+    for( ; direct_pwm_value > 0; direct_pwm_value--) { // don't do zero yet
+      int gated_count = gfade::gated_pwm_counts[ direct_pwm_value ];
+      current_percent = direct_pwm_value / 255.0;
+      print(direct_pwm_value); print(F(" ..."));print(gated_count); print(F(" "));println( current_percent * 100.0 );
+      // current direct_pwm_value is +1
 
+      // will start at (direct_pwm_value, 255)
+      analogWrite(pin, direct_pwm_value); // because the gated-fade gets us to direct_pwm_value-1
+      delay(5); // wait for n -> n-1, because at 244hz, can take 4ms for pwm counter to finish previous count
       for(
-          int i = 1; // skip 255
-          i <= gated_count;
+          int i = 0; // start at (direct_pwm_value, 255)
+          i < gated_count - 1;
           i++
           ) {
-        byte gate_pwm = gfade::top_direct_pwm[i];
-        print(F("  g "));println(gate_pwm);
-        delay(step_delay);
+        byte gate_pwm = gfade::direct_pwm[i];
+        //if (direct_pwm_value == 2 && i < 18) continue; //X
         analogWrite(led_gater, gate_pwm);
+        current_percent = (direct_pwm_value / 255.0) * (gate_pwm / 255.0);
+        print(direct_pwm_value);print(F(" @"));print(i);print(F(" g "));print(gate_pwm);
+          print(F(" ")); print( current_percent * 100);print(F(" - ")); println( current_percent / last_percent * 100);
+        last_percent = current_percent;
+        delay( step_delay );
+        //if ( direct_pwm_value == 1 && i > 0 ) { delay(500); break;} //X
         }
 
-        // last step to direct pwm value
-        delay(step_delay);
-        print(direct);print(F(" g "));println(255);
-        analogWrite(pin, direct); // because the gated-fade gets us to direct-1
-        analogWrite(led_gater, 255);
-        }
+      }
 
     if (Serial.available() > 0) break;
     }
